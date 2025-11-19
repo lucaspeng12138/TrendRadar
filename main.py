@@ -15,13 +15,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 
+import html
 import pytz
 import requests
 import yaml
+from docx import Document
+from docx.shared import Inches, Pt
+from docx.oxml.ns import nsdecls, qn
+from docx.oxml import parse_xml
+import docx
 
 
 VERSION = "3.0.5"
 
+IMAGE_MEDIA_ID = "PBGLLDDRYDaKx0lMEZiovZJIqhn7zqSXM4SBt72mSRbD3in25BUi8cbK5biY4e5c"
+IMAGE_MEDIA_URL = "http://mmbiz.qpic.cn/mmbiz_jpg/tBianxhgdafX7mt1fSficzagPK3eOvyqp6zluiaqrs6GwcAKwibTDicT1n8ZOPXAlaUiacgQ7rGW9A3fdYbApEiaB1uvA/0?wx_fmt=jpeg"
 
 # === SMTP邮件配置 ===
 SMTP_CONFIGS = {
@@ -179,6 +187,19 @@ def load_config():
         "ntfy_token", ""
     )
 
+    # 微信公众号配置
+    config["WECHAT_APP_ID"] = os.environ.get("WECHAT_APP_ID", "").strip() or webhooks.get(
+        "wechat_app_id", ""
+    )
+    config["WECHAT_APP_SECRET"] = os.environ.get(
+        "WECHAT_APP_SECRET", ""
+    ).strip() or webhooks.get("wechat_app_secret", "")
+
+    # 推送 GITHUB
+    config["PUSH_GITHUB"] = os.environ.get("PUSH_GITHUB", "").strip() or webhooks.get(
+        "push_github", ""
+    )
+
     # 输出配置来源信息
     notification_sources = []
     if config["FEISHU_WEBHOOK_URL"]:
@@ -204,6 +225,10 @@ def load_config():
         server_source = "环境变量" if os.environ.get("NTFY_SERVER_URL") else "配置文件"
         notification_sources.append(f"ntfy({server_source})")
 
+    if config["WECHAT_APP_ID"] and config["WECHAT_APP_SECRET"]:
+        app_source = "环境变量" if os.environ.get("WECHAT_APP_ID") else "配置文件"
+        notification_sources.append(f"微信公众号({app_source})")
+
     if notification_sources:
         print(f"通知渠道配置来源: {', '.join(notification_sources)}")
     else:
@@ -219,6 +244,25 @@ print(f"监控平台数量: {len(CONFIG['PLATFORMS'])}")
 
 
 # === 工具函数 ===
+def emoji_to_text(text: str) -> str:
+    """将表情符号转换为文字描述，用于企业微信等不支持表情符号的平台"""
+    emoji_map = {
+        "🆕": "[NEW]",
+        "🔥": "[HOT]",
+        "📊": "[STATS]",
+        "📈": "[TREND]",
+        "📌": "[PIN]",
+        "🌟": "[STAR]",
+        "🔗": "[LINK]",
+    }
+
+    result = text
+    for emoji, text_rep in emoji_map.items():
+        result = result.replace(emoji, text_rep)
+
+    return result
+
+
 def get_beijing_time():
     """获取北京时间"""
     return datetime.now(pytz.timezone("Asia/Shanghai"))
@@ -247,6 +291,11 @@ def clean_title(title: str) -> str:
 def ensure_directory_exists(directory: str):
     """确保目录存在"""
     Path(directory).mkdir(parents=True, exist_ok=True)
+
+
+def get_general_path(filename: str) -> str:
+    output_dir = Path("output")
+    return str(output_dir / filename)
 
 
 def get_output_path(subfolder: str, filename: str) -> str:
@@ -1635,6 +1684,318 @@ def generate_html_report(
     return file_path
 
 
+def generate_markdown_report(
+    stats: List[Dict],
+    total_titles: int,
+    failed_ids: Optional[List] = None,
+    new_titles: Optional[Dict] = None,
+    id_to_name: Optional[Dict] = None,
+    mode: str = "daily",
+    is_daily_summary: bool = False,
+    update_info: Optional[Dict] = None,
+) -> str:
+    """生成Markdown报告"""
+    if is_daily_summary:
+        if mode == "current":
+            filename = "当前榜单.md"
+        elif mode == "incremental":
+            filename = "当日增量.md"
+        else:
+            filename = "当日汇总.md"
+    else:
+        filename = f"{format_time_filename()}.md"
+
+    file_path = get_output_path("md", filename)
+
+    report_data = prepare_report_data(stats, failed_ids, new_titles, id_to_name, mode)
+
+    markdown_content = render_markdown_content(
+        report_data, total_titles, is_daily_summary, mode, update_info
+    )
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(markdown_content)
+
+    return file_path
+
+
+def generate_general_markdown_report(
+    stats: List[Dict],
+    total_titles: int,
+    failed_ids: Optional[List] = None,
+    new_titles: Optional[Dict] = None,
+    id_to_name: Optional[Dict] = None,
+    mode: str = "daily",
+    is_daily_summary: bool = False,
+    update_info: Optional[Dict] = None,
+) -> str:
+    """生成Markdown报告"""
+    if is_daily_summary:
+        if mode == "current":
+            filename = "当前榜单.md"
+        elif mode == "incremental":
+            filename = "当日增量.md"
+        else:
+            filename = "当日汇总.md"
+    else:
+        filename = f"{format_time_filename()}.md"
+
+    file_path = get_general_path(filename)
+
+    report_data = prepare_report_data(stats, failed_ids, new_titles, id_to_name, mode)
+
+    markdown_content = render_markdown_content(
+        report_data, total_titles, is_daily_summary, mode, update_info
+    )
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(markdown_content)
+
+    return file_path
+
+
+def generate_docx_report(
+    stats: List[Dict],
+    total_titles: int,
+    failed_ids: Optional[List] = None,
+    new_titles: Optional[Dict] = None,
+    id_to_name: Optional[Dict] = None,
+    mode: str = "daily",
+    is_daily_summary: bool = False,
+    update_info: Optional[Dict] = None,
+) -> str:
+    """生成Word文档报告"""
+    if is_daily_summary:
+        if mode == "current":
+            filename = "当前榜单.docx"
+        elif mode == "incremental":
+            filename = "当日增量.docx"
+        else:
+            filename = "当日汇总.docx"
+    else:
+        filename = f"{format_time_filename()}.docx"
+
+    file_path = get_output_path("docx", filename)
+
+    report_data = prepare_report_data(stats, failed_ids, new_titles, id_to_name, mode)
+
+    docx_document = render_docx_content(
+        report_data, total_titles, is_daily_summary, mode, update_info
+    )
+
+    docx_document.save(file_path)
+
+    return file_path
+
+
+def render_docx_content(
+    report_data: Dict,
+    total_titles: int,
+    is_daily_summary: bool = False,
+    mode: str = "daily",
+    update_info: Optional[Dict] = None,
+) -> Document:
+    """渲染Word文档内容"""
+    doc = Document()
+
+    # 设置文档样式
+    style = doc.styles['Normal']
+    style.font.name = 'Microsoft YaHei'
+    style.font.size = Pt(10.5)
+    style._element.rPr.rFonts.set(qn('w:eastAsia'), 'Microsoft YaHei')
+
+    # 标题
+    title = doc.add_heading('热点新闻分析', 0)
+    title.alignment = 1  # 居中对齐
+
+    # 报告信息
+    now = get_beijing_time()
+
+    if is_daily_summary:
+        if mode == "current":
+            report_type = "当前榜单"
+        elif mode == "incremental":
+            report_type = "增量模式"
+        else:
+            report_type = "当日汇总"
+    else:
+        report_type = "实时分析"
+
+    # 添加报告信息段落
+    info_paragraph = doc.add_paragraph()
+    info_paragraph.add_run(f"报告类型: {report_type}").bold = True
+    info_paragraph.add_run("\n")
+    info_paragraph.add_run(f"新闻总数: {total_titles} 条").bold = True
+    info_paragraph.add_run("\n")
+
+    # 计算筛选后的热点新闻数量
+    hot_news_count = sum(len(stat["titles"]) for stat in report_data["stats"])
+    info_paragraph.add_run(f"热点新闻: {hot_news_count} 条").bold = True
+    info_paragraph.add_run("\n")
+    info_paragraph.add_run(f"生成时间: {now.strftime('%m-%d %H:%M')}").bold = True
+
+    # 热点词汇统计
+    if report_data["stats"]:
+        doc.add_heading('热点词汇统计', level=2)
+
+        for i, stat in enumerate(report_data["stats"], 1):
+            word = stat["word"]
+            count = stat["count"]
+            percentage = stat.get("percentage", 0)
+
+            # 热度标记
+            if count >= 10:
+                hot_mark = "🔥"
+            elif count >= 5:
+                hot_mark = "🌟"
+            else:
+                hot_mark = "📈"
+
+            # 词汇标题
+            word_paragraph = doc.add_paragraph()
+            word_paragraph.add_run(f"{i}. {hot_mark} {word} ").bold = True
+            word_paragraph.add_run(f"(出现 {count} 次, 占比 {percentage:.1f}%)")
+
+            # 添加新闻列表
+            for title_data in stat["titles"]:
+                title = title_data["title"]
+                source_name = title_data["source_name"]
+                time_display = title_data["time_display"]
+                url = title_data.get("url", "")
+                mobile_url = title_data.get("mobile_url", "")
+
+                # 新闻条目
+                news_paragraph = doc.add_paragraph(style='List Bullet')
+                news_paragraph.add_run(f"{title}").bold = True
+                news_paragraph.add_run(f" - {source_name}")
+                if time_display:
+                    news_paragraph.add_run(f" ({time_display})")
+
+                # 添加链接（如果有）
+                if url:
+                    news_paragraph.add_run("\n")
+                    link_run = news_paragraph.add_run(f"🔗 {url}")
+                    link_run.font.color.rgb = docx.shared.RGBColor(0, 0, 255)  # 蓝色
+                    link_run.font.underline = True  # 下划线
+
+                    # 尝试创建真正的超链接（如果python-docx支持）
+                    try:
+                        # 创建超链接关系
+                        r_id = doc.part.relate_to(url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+
+                        # 创建超链接元素
+                        hyperlink = docx.oxml.shared.OxmlElement('w:hyperlink')
+                        hyperlink.set(docx.oxml.shared.qn('r:id'), r_id)
+
+                        # 创建run元素
+                        run = docx.oxml.shared.OxmlElement('w:r')
+
+                        # 添加样式
+                        rPr = docx.oxml.shared.OxmlElement('w:rPr')
+                        color = docx.oxml.shared.OxmlElement('w:color')
+                        color.set(docx.oxml.shared.qn('w:val'), '0000FF')
+                        underline = docx.oxml.shared.OxmlElement('w:u')
+                        underline.set(docx.oxml.shared.qn('w:val'), 'single')
+                        rPr.append(color)
+                        rPr.append(underline)
+                        run.append(rPr)
+
+                        # 添加文本
+                        text_elem = docx.oxml.shared.OxmlElement('w:t')
+                        text_elem.text = url
+                        run.append(text_elem)
+
+                        hyperlink.append(run)
+
+                        # 替换原来的run元素
+                        news_paragraph._element.remove(link_run._element)
+                        news_paragraph._element.append(hyperlink)
+
+                    except Exception:
+                        # 如果超链接创建失败，至少保持蓝色下划线样式作为视觉提示
+                        pass
+
+            # 添加分隔
+            doc.add_paragraph("")
+
+    # 新增新闻部分
+    if report_data["new_titles"] and report_data["total_new_count"] > 0:
+        doc.add_heading('新增新闻', level=2)
+
+        for source_data in report_data["new_titles"]:
+            source_name = source_data["source_name"]
+            titles = source_data["titles"]
+
+            # 来源标题
+            source_paragraph = doc.add_paragraph()
+            source_paragraph.add_run(f"📱 {source_name}").bold = True
+
+            for title_data in titles:
+                title = title_data["title"]
+                url = title_data.get("url", "")
+                mobile_url = title_data.get("mobile_url", "")
+
+                # 新闻条目
+                news_paragraph = doc.add_paragraph(style='List Bullet')
+                news_paragraph.add_run(title).bold = True
+
+                # 添加链接（如果有）
+                if url:
+                    news_paragraph.add_run("\n")
+                    link_run = news_paragraph.add_run(f"🔗 {url}")
+                    link_run.font.color.rgb = docx.shared.RGBColor(0, 0, 255)  # 蓝色
+                    link_run.font.underline = True  # 下划线
+
+                    # 尝试创建真正的超链接（如果python-docx支持）
+                    try:
+                        # 创建超链接关系
+                        r_id = doc.part.relate_to(url, docx.opc.constants.RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+
+                        # 创建超链接元素
+                        hyperlink = docx.oxml.shared.OxmlElement('w:hyperlink')
+                        hyperlink.set(docx.oxml.shared.qn('r:id'), r_id)
+
+                        # 创建run元素
+                        run = docx.oxml.shared.OxmlElement('w:r')
+
+                        # 添加样式
+                        rPr = docx.oxml.shared.OxmlElement('w:rPr')
+                        color = docx.oxml.shared.OxmlElement('w:color')
+                        color.set(docx.oxml.shared.qn('w:val'), '0000FF')
+                        underline = docx.oxml.shared.OxmlElement('w:u')
+                        underline.set(docx.oxml.shared.qn('w:val'), 'single')
+                        rPr.append(color)
+                        rPr.append(underline)
+                        run.append(rPr)
+
+                        # 添加文本
+                        text_elem = docx.oxml.shared.OxmlElement('w:t')
+                        text_elem.text = url
+                        run.append(text_elem)
+
+                        hyperlink.append(run)
+
+                        # 替换原来的run元素
+                        news_paragraph._element.remove(link_run._element)
+                        news_paragraph._element.append(hyperlink)
+
+                    except Exception:
+                        # 如果超链接创建失败，至少保持蓝色下划线样式作为视觉提示
+                        pass
+
+            # 添加分隔
+            doc.add_paragraph("")
+
+    # 版本更新信息
+    if update_info:
+        doc.add_heading('版本更新', level=2)
+        update_paragraph = doc.add_paragraph()
+        update_paragraph.add_run("🎉 ").bold = True
+        update_paragraph.add_run(update_info["message"])
+
+    return doc
+
+
 def render_html_content(
     report_data: Dict,
     total_titles: int,
@@ -2644,6 +3005,142 @@ def render_html_content(
     return html
 
 
+def render_markdown_content(
+    report_data: Dict,
+    total_titles: int,
+    is_daily_summary: bool = False,
+    mode: str = "daily",
+    update_info: Optional[Dict] = None,
+) -> str:
+    """渲染Markdown内容"""
+    markdown_lines = []
+
+    # 标题
+    markdown_lines.append("# 热点新闻分析")
+    markdown_lines.append("")
+
+    # 报告信息
+    now = get_beijing_time()
+
+    if is_daily_summary:
+        if mode == "current":
+            report_type = "当前榜单"
+        elif mode == "incremental":
+            report_type = "增量模式"
+        else:
+            report_type = "当日汇总"
+    else:
+        report_type = "实时分析"
+
+    markdown_lines.append(f"**报告类型**: {report_type}")
+    markdown_lines.append(f"**新闻总数**: {total_titles} 条")
+
+    # 计算筛选后的热点新闻数量
+    hot_news_count = sum(len(stat["titles"]) for stat in report_data["stats"])
+    markdown_lines.append(f"**热点新闻**: {hot_news_count} 条")
+    markdown_lines.append(f"**生成时间**: {now.strftime('%m-%d %H:%M')}")
+    markdown_lines.append("")
+
+    # 热点词汇统计
+    if report_data["stats"]:
+        markdown_lines.append("## 📊 热点词汇统计")
+        markdown_lines.append("")
+
+        for i, stat in enumerate(report_data["stats"], 1):
+            word = stat["word"]
+            count = stat["count"]
+            percentage = stat.get("percentage", 0)
+
+            # 热度标记
+            if count >= 10:
+                hot_mark = "🔥"
+            elif count >= 5:
+                hot_mark = "🌡️"
+            else:
+                hot_mark = ""
+
+            markdown_lines.append(f"### {i}. {word} {hot_mark}")
+            markdown_lines.append(f"**出现次数**: {count} 次 ({percentage:.1f}%)")
+            markdown_lines.append("")
+
+            # 相关新闻
+            if stat["titles"]:
+                markdown_lines.append("**相关新闻**:")
+                markdown_lines.append("")
+
+                for j, title_data in enumerate(stat["titles"], 1):
+                    title = title_data["title"]
+                    source_name = title_data["source_name"]
+                    url = title_data.get("url", "")
+                    is_new = title_data.get("is_new", False)
+
+                    new_mark = " 🆕" if is_new else ""
+                    news_item = f"{j}. **{source_name}**: {title}{new_mark}"
+
+                    if url:
+                        news_item = f"{j}. **{source_name}**: [{title}]({url}){new_mark}"
+
+                    markdown_lines.append(news_item)
+
+                markdown_lines.append("")
+
+    # 新增新闻部分
+    if report_data["new_titles"] and not (mode == "incremental"):
+        markdown_lines.append("## 🆕 新增新闻")
+        markdown_lines.append("")
+        markdown_lines.append(f"**新增新闻总数**: {report_data['total_new_count']} 条")
+        markdown_lines.append("")
+
+        for source_data in report_data["new_titles"]:
+            source_name = source_data["source_name"]
+            titles = source_data["titles"]
+
+            if titles:
+                markdown_lines.append(f"### {source_name}")
+                markdown_lines.append("")
+
+                for j, title_data in enumerate(titles, 1):
+                    title = title_data["title"]
+                    url = title_data.get("url", "")
+
+                    if url:
+                        news_item = f"{j}. [{title}]({url})"
+                    else:
+                        news_item = f"{j}. {title}"
+
+                    markdown_lines.append(news_item)
+
+                markdown_lines.append("")
+
+    # 失败统计
+    if report_data["failed_ids"]:
+        markdown_lines.append("## ⚠️ 数据获取失败")
+        markdown_lines.append("")
+        markdown_lines.append(f"**失败数量**: {len(report_data['failed_ids'])} 个")
+        markdown_lines.append("")
+        markdown_lines.append("失败的来源ID:")
+        for failed_id in report_data["failed_ids"]:
+            markdown_lines.append(f"- {failed_id}")
+        markdown_lines.append("")
+
+    # 更新信息
+    if update_info and CONFIG.get("SHOW_VERSION_UPDATE", False):
+        markdown_lines.append("## 📦 版本更新")
+        markdown_lines.append("")
+        markdown_lines.append(f"**最新版本**: {update_info.get('latest_version', '未知')}")
+        markdown_lines.append(f"**更新内容**: {update_info.get('update_content', '暂无更新信息')}")
+        if update_info.get("download_url"):
+            markdown_lines.append(f"**下载地址**: {update_info['download_url']}")
+        markdown_lines.append("")
+
+    # 页脚
+    markdown_lines.append("---")
+    markdown_lines.append("")
+    markdown_lines.append("*此报告由 白泽的小桌 生成*")
+
+    return "\n".join(markdown_lines)
+
+
 def render_feishu_content(
     report_data: Dict, update_info: Optional[Dict] = None, mode: str = "daily"
 ) -> str:
@@ -3291,6 +3788,99 @@ def split_content_into_batches(
     return batches
 
 
+def get_access_token(app_id, app_secret):
+    url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={app_id}&secret={app_secret}"
+    resp = requests.get(url)
+    return resp.json().get('access_token')
+
+
+def add_draft(access_token, article):
+    url = f"https://api.weixin.qq.com/cgi-bin/draft/add?access_token={access_token}"
+    data = {
+        "articles": [{
+            "article_type": "news",  # 必需字段：图文消息类型
+            "title": article["title"],
+            "author": article["author"],
+            "digest": article["digest"],
+            "content": article["content"],
+            "thumb_media_id": IMAGE_MEDIA_ID,
+        }]
+    }
+    resp = requests.post(url, json=data)
+    return resp.json()
+
+
+def publish_draft(access_token, draft_media_id):
+    url = f"https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token={access_token}"
+    data = {"media_id": draft_media_id}
+    resp = requests.post(url, json=data)
+    return resp.json()
+
+
+def send_to_wechat(app_id, app_secret, report_data, report_type, update_info_to_send, mode):
+    access_token = get_access_token(app_id, app_secret)
+
+    # 获取分批内容，使用微信公众号的文章长度限制
+    batches = split_content_into_batches(
+        report_data, "wework", update_info_to_send, max_bytes=4000, mode=mode  # 图文消息内容更长
+    )
+    print(f"微信公众号文章分为 {len(batches)} 批次群发 [{report_type}]")
+
+    # 逐批群发文章
+    for i, batch_content in enumerate(batches, 1):
+        batch_size = len(batch_content.encode("utf-8"))
+        print(f"群发微信公众号第 {i}/{len(batches)} 批文章，大小：{batch_size} 字节 [{report_type}]")
+
+        # 添加批次标识到标题
+        if len(batches) > 1:
+            title_suffix = f" (第{i}/{len(batches)}批)"
+        else:
+            title_suffix = ""
+
+        # 构建文章标题
+        title_map = {
+            "当日汇总": f"热点新闻日报{title_suffix}",
+            "当前榜单汇总": f"实时热点榜单{title_suffix}",
+            "增量更新": f"新增热点新闻{title_suffix}",
+            "实时增量": f"实时新增热点{title_suffix}",
+            "实时当前榜单": f"实时当前榜单{title_suffix}",
+        }
+        article_title = title_map.get(report_type, f"TrendRadar热点分析{title_suffix}")
+
+        # 验证并清理内容
+        if not batch_content or not batch_content.strip():
+            print(f"错误：第 {i} 批文章内容为空，跳过发布")
+            continue
+
+        # 清理和格式化内容 - 移除可能导致问题的字符
+        # 移除或替换特殊字符
+        batch_content = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', batch_content)
+
+        # 将表情符号转换为文字（微信公众号也需要兼容性处理）
+        batch_content = emoji_to_text(batch_content)
+
+        # 构建HTML内容 - 使用更安全的HTML格式
+        content_html = batch_content.replace('\n', '<br/>').replace('\r', '')
+
+        # 进一步清理HTML内容 - 移除可能导致问题的字符
+        # 先进行HTML转义，然后替换回我们需要的br标签
+        content_html = html.escape(content_html)
+        content_html = content_html.replace('&lt;br/&gt;', '<br/>').replace('&lt;br&gt;', '<br/>')
+
+        # 构建图文消息素材 - 按照WeChat官方API规范
+        # 参考: https://developers.weixin.qq.com/doc/subscription/api/draftbox/draftmanage/api_draft_add.html
+        draft_article = {
+            "title": article_title,
+            "author": "Baize",
+            "digest": f"自动生成的{report_type}报告，包含最新热点新闻分析",
+            "content": content_html,
+        }
+
+        draft_result = add_draft(access_token, draft_article)
+        publish_result = publish_draft(access_token, draft_result.get("media_id"))
+        print(f"微信公众号第 {i}/{len(batches)} 批次发布结果 [{publish_result}]")
+
+
 def send_to_notifications(
     stats: List[Dict],
     failed_ids: Optional[List] = None,
@@ -3339,6 +3929,9 @@ def send_to_notifications(
     ntfy_server_url = CONFIG["NTFY_SERVER_URL"]
     ntfy_topic = CONFIG["NTFY_TOPIC"]
     ntfy_token = CONFIG.get("NTFY_TOKEN", "")
+    wechat_app_id = CONFIG["WECHAT_APP_ID"]
+    wechat_app_secret = CONFIG["WECHAT_APP_SECRET"]
+    push_github = CONFIG["PUSH_GITHUB"]
 
     update_info_to_send = update_info if CONFIG["SHOW_VERSION_UPDATE"] else None
 
@@ -3385,6 +3978,18 @@ def send_to_notifications(
             mode,
         )
 
+    # 发送到微信公众号
+    if wechat_app_id and wechat_app_secret and wechat_app_id != "" and wechat_app_secret != "": 
+        print(f"调试信息 - 准备发送到微信公众号: AppID='{wechat_app_id}'")
+        results["wechat"] = send_to_wechat(
+            wechat_app_id,
+            wechat_app_secret,
+            report_data,
+            report_type,
+            update_info_to_send,
+            mode,
+        )
+
     # 发送邮件
     if email_from and email_password and email_to:
         results["email"] = send_to_email(
@@ -3396,6 +4001,9 @@ def send_to_notifications(
             email_smtp_server,
             email_smtp_port,
         )
+
+    if str(push_github).lower() == "true":
+        results["github"] = send_to_github()
 
     if not results:
         print("未配置任何通知渠道，跳过通知发送")
@@ -3614,6 +4222,9 @@ def send_to_wework(
             batch_header = f"**[第 {i}/{len(batches)} 批次]**\n\n"
             batch_content = batch_header + batch_content
 
+        # 将表情符号转换为文字（企业微信不支持表情符号）
+        batch_content = emoji_to_text(batch_content)
+
         payload = {"msgtype": "markdown", "markdown": {"content": batch_content}}
 
         try:
@@ -3715,6 +4326,12 @@ def send_to_telegram(
 
     print(f"Telegram所有 {len(batches)} 批次发送完成 [{report_type}]")
     return True
+
+
+def send_to_github() -> None:
+    # Run git command to add all files and commit with message
+    os.system("git add .; git commit --amend--no-edit; git push -f")
+    print("GitHub commit and push successful")
 
 
 def send_to_email(
@@ -3873,10 +4490,10 @@ def send_to_ntfy(
         "当日汇总": "Daily Summary",
         "当前榜单汇总": "Current Ranking",
         "增量更新": "Incremental Update",
-        "实时增量": "Realtime Incremental", 
-        "实时当前榜单": "Realtime Current Ranking",  
+        "实时增量": "Realtime Incremental",
+        "实时当前榜单": "Realtime Current Ranking",
     }
-    report_type_en = report_type_en_map.get(report_type, "News Report") 
+    report_type_en = report_type_en_map.get(report_type, "News Report")
 
     headers = {
         "Content-Type": "text/plain; charset=utf-8",
@@ -3888,7 +4505,7 @@ def send_to_ntfy(
 
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    
+
     # 构建完整URL，确保格式正确
     base_url = server_url.rstrip("/")
     if not base_url.startswith(("http://", "https://")):
@@ -3910,7 +4527,7 @@ def send_to_ntfy(
     # 反转批次顺序，使得在ntfy客户端显示时顺序正确
     # ntfy显示最新消息在上面，所以我们从最后一批开始推送
     reversed_batches = list(reversed(batches))
-    
+
     print(f"ntfy将按反向顺序推送（最后批次先推送），确保客户端显示顺序正确")
 
     # 逐批发送（反向顺序）
@@ -3918,7 +4535,7 @@ def send_to_ntfy(
     for idx, batch_content in enumerate(reversed_batches, 1):
         # 计算正确的批次编号（用户视角的编号）
         actual_batch_num = total_batches - idx + 1
-        
+
         batch_size = len(batch_content.encode("utf-8"))
         print(
             f"发送ntfy第 {actual_batch_num}/{total_batches} 批次（推送顺序: {idx}/{total_batches}），大小：{batch_size} 字节 [{report_type}]"
@@ -4119,6 +4736,10 @@ class NewsAnalyzer:
                     and CONFIG["EMAIL_TO"]
                 ),
                 (CONFIG["NTFY_SERVER_URL"] and CONFIG["NTFY_TOPIC"]),
+                (
+                    CONFIG["WECHAT_APP_ID"]
+                    and CONFIG["WECHAT_APP_SECRET"]
+                ),
             ]
         )
 
@@ -4206,8 +4827,8 @@ class NewsAnalyzer:
         id_to_name: Dict,
         failed_ids: Optional[List] = None,
         is_daily_summary: bool = False,
-    ) -> Tuple[List[Dict], str]:
-        """统一的分析流水线：数据处理 → 统计计算 → HTML生成"""
+    ) -> Tuple[List[Dict], str, str]:
+        """统一的分析流水线：数据处理 → 统计计算 → HTML、和Markdown文档生成"""
 
         # 统计计算
         stats, total_titles = count_word_frequency(
@@ -4233,7 +4854,30 @@ class NewsAnalyzer:
             update_info=self.update_info if CONFIG["SHOW_VERSION_UPDATE"] else None,
         )
 
-        return stats, html_file
+        # Markdown生成
+        markdown_file = generate_markdown_report(
+            stats,
+            total_titles,
+            failed_ids=failed_ids,
+            new_titles=new_titles,
+            id_to_name=id_to_name,
+            mode=mode,
+            is_daily_summary=is_daily_summary,
+            update_info=self.update_info if CONFIG["SHOW_VERSION_UPDATE"] else None,
+        )
+
+        _ = generate_general_markdown_report(
+            stats,
+            total_titles,
+            failed_ids=failed_ids,
+            new_titles=new_titles,
+            id_to_name=id_to_name,
+            mode=mode,
+            is_daily_summary=is_daily_summary,
+            update_info=self.update_info if CONFIG["SHOW_VERSION_UPDATE"] else None,
+        )
+
+        return stats, html_file, markdown_file
 
     def _send_notification_if_needed(
         self,
@@ -4303,7 +4947,7 @@ class NewsAnalyzer:
         )
 
         # 运行分析流水线
-        stats, html_file = self._run_analysis_pipeline(
+        stats, html_file, markdown_file = self._run_analysis_pipeline(
             all_results,
             mode_strategy["summary_mode"],
             title_info,
@@ -4314,7 +4958,7 @@ class NewsAnalyzer:
             is_daily_summary=True,
         )
 
-        print(f"{summary_type}报告已生成: {html_file}")
+        print(f"{summary_type}报告已生成: {html_file}, {markdown_file}")
 
         # 发送通知
         self._send_notification_if_needed(
@@ -4344,7 +4988,7 @@ class NewsAnalyzer:
         )
 
         # 运行分析流水线
-        _, html_file = self._run_analysis_pipeline(
+        _, html_file, markdown_file = self._run_analysis_pipeline(
             all_results,
             mode,
             title_info,
@@ -4355,7 +4999,7 @@ class NewsAnalyzer:
             is_daily_summary=True,
         )
 
-        print(f"{summary_type}HTML已生成: {html_file}")
+        print(f"{summary_type}报告已生成: {html_file}, {markdown_file}")
         return html_file
 
     def _initialize_and_check_config(self) -> None:
@@ -4432,7 +5076,7 @@ class NewsAnalyzer:
                     f"current模式：使用过滤后的历史数据，包含平台：{list(all_results.keys())}"
                 )
 
-                stats, html_file = self._run_analysis_pipeline(
+                stats, html_file, markdown_file = self._run_analysis_pipeline(
                     all_results,
                     self.report_mode,
                     historical_title_info,
@@ -4445,7 +5089,7 @@ class NewsAnalyzer:
 
                 combined_id_to_name = {**historical_id_to_name, **id_to_name}
 
-                print(f"HTML报告已生成: {html_file}")
+                print(f"报告已生成: {html_file}, {markdown_file}")
 
                 # 发送实时通知（使用完整历史数据的统计结果）
                 summary_html = None
@@ -4464,7 +5108,7 @@ class NewsAnalyzer:
                 raise RuntimeError("数据一致性检查失败：保存后立即读取失败")
         else:
             title_info = self._prepare_current_title_info(results, time_info)
-            stats, html_file = self._run_analysis_pipeline(
+            stats, html_file, markdown_file = self._run_analysis_pipeline(
                 results,
                 self.report_mode,
                 title_info,
@@ -4474,7 +5118,7 @@ class NewsAnalyzer:
                 id_to_name,
                 failed_ids=failed_ids,
             )
-            print(f"HTML报告已生成: {html_file}")
+            print(f"报告已生成: {html_file}, {markdown_file}")
 
             # 发送实时通知（如果需要）
             summary_html = None

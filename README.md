@@ -1474,6 +1474,94 @@ docker exec -it trend-radar ls -la /app/config/
 ```
 
 
+## ⏰ Linux 定时任务部署
+
+TrendRadar 支持在 Linux 系统上设置定时任务，每4小时自动运行数据分析。
+
+### 📋 前置要求
+
+- Linux 系统（Ubuntu/CentOS/Debian 等）
+- 已完成项目部署（虚拟环境已设置）
+- crontab 服务可用
+
+### 🚀 快速设置
+
+```bash
+# 1. 确保在项目根目录
+cd /path/to/TrendRadar
+
+# 2. 设置定时任务（每4小时运行一次）
+./setup-cron.sh
+
+# 3. 验证设置
+crontab -l
+```
+
+**执行时间点：** 00:00, 04:00, 08:00, 12:00, 16:00, 20:00
+
+### 📁 日志查看
+
+```bash
+# 查看最新日志
+tail -f logs/*.log
+
+# 查看日志目录
+ls -la logs/
+```
+
+### 🛑 停止定时任务
+
+```bash
+# 移除定时任务
+./remove-cron.sh
+```
+
+### 📝 手动运行测试
+
+```bash
+# 手动运行一次（用于测试）
+./run-periodic.sh
+```
+
+### ⚙️ 自定义执行频率
+
+如果需要修改执行频率，请编辑 `setup-cron.sh` 中的 `CRON_TIME` 变量：
+
+```bash
+# 每2小时执行一次
+CRON_TIME="0 */2 * * *"
+
+# 每天早上8点执行
+CRON_TIME="0 8 * * *"
+
+# 每小时执行一次
+CRON_TIME="0 * * * *"
+```
+
+### 🔧 故障排除
+
+1. **权限问题**：确保脚本有执行权限
+   ```bash
+   chmod +x *.sh
+   ```
+
+2. **环境问题**：确保虚拟环境和依赖已正确安装
+   ```bash
+   ./setup-mac.sh  # 或相应的设置脚本
+   ```
+
+3. **日志检查**：查看日志文件了解具体错误
+   ```bash
+   tail -n 50 logs/trendradar_*.log
+   ```
+
+4. **crontab 服务**：确保 cron 服务正在运行
+   ```bash
+   sudo systemctl status cron
+   sudo systemctl start cron  # 如果未启动
+   ```
+
+
 ## 🤖 AI 智能分析部署
 
 TrendRadar v3.0.0 新增了基于 **MCP (Model Context Protocol)** 的 AI 分析功能，让你可以通过自然语言与新闻数据对话，进行深度分析。

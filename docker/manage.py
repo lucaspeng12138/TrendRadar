@@ -275,6 +275,8 @@ def show_config():
         "FEISHU_WEBHOOK_URL",
         "DINGTALK_WEBHOOK_URL",
         "WEWORK_WEBHOOK_URL",
+        "WECHAT_APP_ID",
+        "WECHAT_APP_SECRET",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHAT_ID",
         "CONFIG_PATH",
