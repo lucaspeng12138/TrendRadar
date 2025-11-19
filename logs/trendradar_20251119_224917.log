@@ -1,0 +1,5 @@
+[2025-11-19 22:49:17] === TrendRadar 定期任务开始 ===
+[2025-11-19 22:49:17] 工作目录: /home/baize/workspace/TrendRadar
+[2025-11-19 22:49:17] 日志文件: /home/baize/workspace/TrendRadar/logs/trendradar_20251119_224917.log
+[2025-11-19 22:49:17] ❌ 错误: 虚拟环境未找到 (.venv)
+[2025-11-19 22:49:17] 请先运行 ./setup-mac.sh 或相应的设置脚本
